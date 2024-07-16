@@ -1,0 +1,12 @@
+altair
+boto3
+ccxt
+google
+gspread
+pandas
+regex
+requests
+matplotlib
+s3fs==0.4.*
+streamlit==1.1.*
+matplotlib==3.2.2
