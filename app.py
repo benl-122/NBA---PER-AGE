@@ -7,9 +7,6 @@ st.set_option('deprecation.showPyplotGlobalUse', False)
 # Load the CSV file
 df = pd.read_csv('player_advanced_stats.csv')
 
-st.title("Player Efficiency Rating")
-st.divider()
-
 # Filter unique positions
 position_list = df['Pos'].unique()
 selected_position = st.sidebar.selectbox('Select a position:', position_list)
@@ -27,6 +24,10 @@ selected_metric = st.sidebar.selectbox('Select a metric:', metric_list)
 
 # Filter the data for the selected player
 player_data = filtered_df[filtered_df['Player'] == selected_player]
+
+#title
+st.title(f"{selected_player}: {selected_metric}")
+st.divider()
 
 # Reorder columns to insert 'Season' as the 4th column
 if 'Season' in player_data.columns:
