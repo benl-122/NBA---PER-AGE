@@ -112,4 +112,19 @@ plt.grid(True)
 # Display the plot within Streamlit
 st.pyplot()
 
+# Plotting the line graph for player's metric vs Age and average metric vs Age and the median metric vs Age
+plt.figure(figsize=(10, 6))
+plt.plot(player_data['Age'], player_data[selected_metric], marker='o', linestyle='-', color='blue', label=f'{selected_player}')
+plt.plot(average_metric['Age'], average_metric[selected_metric], marker='o', linestyle='--', color='orange', label='Average')
+plt.plot(median_metric['Age'], median_metric[selected_metric], marker='o', linestyle='--', color='green', label='Median')
+
+plt.title(f'{selected_player} vs Average - {selected_metric} vs Age')
+plt.xlabel('Age')
+plt.ylabel(selected_metric)
+plt.legend()
+plt.grid(True)
+
+# Display the plot within Streamlit
+st.pyplot()
+
 st.write("Note: the player efficiency rating sometimes spikes in the later years because typically, only star players continue to play at an older age. The sample size is therefore smaller including only very good players, and this leads to a higher efficiency rating than what otherwise may be expected with an increase in age.")
