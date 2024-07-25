@@ -19,6 +19,27 @@ selected_metric = st.sidebar.selectbox('Select a metric:', metric_list)
 # show data accordingly
 player_data = filtered_df[filtered_df['Player'] == selected_player]
 
+st.sidebar.write("""
+**Metrics:**
+- **PER**: Player Efficiency Rating
+- **TS%**: True Shooting Percentage
+- **FTr**: Free Throw Rate
+- **ORB%**: Offensive Rebound Percentage
+- **DRB%**: Defensive Rebound Percentage
+- **AST%**: Assist Percentage
+- **STL%**: Steal Percentage
+- **BLK%**: Block Percentage
+- **TOV%**: Turnover Percentage
+- **USG%**: Usage Percentage
+- **OWS**: Offensive Win Shares
+- **DWS**: Defensive Win Shares
+- **WS/48**: Win Shares per 48 Minutes
+- **OBPM**: Offensive Box Plus-Minus
+- **DBPM**: Defensive Box Plus-Minus
+- **BPM**: Box Plus-Minus
+- **VORP**: Value Over Replacement Player
+""")
+
 #title
 st.title(f"{selected_player}: {selected_metric}")
 st.divider()
