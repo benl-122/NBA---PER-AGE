@@ -19,6 +19,7 @@ selected_metric = st.sidebar.selectbox('Select a metric:', metric_list)
 # show data accordingly
 player_data = filtered_df[filtered_df['Player'] == selected_player]
 
+#explain metrics
 st.sidebar.write("""
 **Metrics:**
 - **PER**: Player Efficiency Rating
