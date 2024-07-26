@@ -143,4 +143,4 @@ plt.grid(True)
 st.pyplot()
 
 #note about suvivorship bias
-st.write("Note: the player efficiency rating sometimes spikes in the later years because typically, only star players continue to play at an older age. The sample size is therefore smaller including only very good players, and this leads to a higher efficiency rating than what otherwise may be expected with an increase in age.")
+st.write("Note: the player metrics sometimes spikes in the later years because typically, only star players continue to play at an older age. The sample size is therefore smaller including only very good players, and this leads to a higher rating than what otherwise may be expected with an increase in age.")
