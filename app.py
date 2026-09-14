@@ -6,8 +6,6 @@ from scipy import stats
 from sklearn.neighbors import NearestNeighbors
 import plotly.graph_objects as go
 
-st.set_option('deprecation.showPyplotGlobalUse', False)
-
 
 @st.cache_data
 def load_data():
