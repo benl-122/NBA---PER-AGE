@@ -69,13 +69,13 @@ st.header(f"Player: {selected_player} ({selected_position})")
 st.write(player_data)
 
 # ===========================================================================
-# NEW FEATURE: Value/Age — headline callout stat
+# NEW FEATURE: PlayerValue — headline callout stat
 # ===========================================================================
 #
 # Design:
 #   - value_metric summarizes overall production (defaults to VORP, an
 #     all-in-one wins-above-replacement style stat).
-#   - Baseline = league-average value at that specific age. Value/Age of 1.0
+#   - Baseline = league-average value at that specific age. PlayerValue of 1.0
 #     means "exactly as productive as the typical player at that age."
 #   - Youth bonus: the same production is worth MORE the younger the player
 #     is, since a young player producing at an average (or above-average)
@@ -83,13 +83,13 @@ st.write(player_data)
 #     older player putting up the same numbers — the same logic real
 #     trade-value charts use to price production + youth together.
 #
-#   value_age = (player_value / league_avg_value_at_age) * youth_multiplier
+#   player_value = (player_value / league_avg_value_at_age) * youth_multiplier
 #   youth_multiplier = 1 + max(0, peak_age - age) * youth_bonus_per_year
-def compute_value_age(df, value_metric='VORP', peak_age=27, youth_bonus_per_year=0.03):
+def compute_player_value(df, value_metric='VORP', peak_age=27, youth_bonus_per_year=0.03):
     data = df.dropna(subset=[value_metric, 'Age']).copy()
     league_avg_by_age = data.groupby('Age')[value_metric].mean()
 
-    def _row_value_age(row):
+    def _row_player_value(row):
         avg_at_age = league_avg_by_age.get(row['Age'], np.nan)
         if pd.isna(avg_at_age) or avg_at_age == 0:
             return np.nan
@@ -97,21 +97,21 @@ def compute_value_age(df, value_metric='VORP', peak_age=27, youth_bonus_per_year
         youth_multiplier = 1 + max(0, peak_age - row['Age']) * youth_bonus_per_year
         return round(ratio * youth_multiplier, 3)
 
-    data['Value/Age'] = data.apply(_row_value_age, axis=1)
+    data['PlayerValue'] = data.apply(_row_player_value, axis=1)
     return data
 
 
-def render_value_age(df, selected_player, selected_season=None, value_metric='VORP',
+def render_player_value(df, selected_player, selected_season=None, value_metric='VORP',
                       peak_age=27, youth_bonus_per_year=0.03):
     """
-    Highlights Value/Age as a standout callout metric (not a chart) - a big
+    Highlights PlayerValue as a standout callout metric (not a chart) - a big
     number plus a one-line interpretation.
     """
-    data = compute_value_age(df, value_metric, peak_age, youth_bonus_per_year)
+    data = compute_player_value(df, value_metric, peak_age, youth_bonus_per_year)
     p_data = data[data['Player'] == selected_player].sort_values('Age')
 
     if p_data.empty:
-        st.write("No Value/Age data available for this player/metric combination.")
+        st.write("No PlayerValue data available for this player/metric combination.")
         return
 
     if selected_season is not None and selected_season in p_data['Season'].values:
@@ -119,10 +119,10 @@ def render_value_age(df, selected_player, selected_season=None, value_metric='VO
     else:
         row = p_data.iloc[-1]
 
-    va = row['Value/Age']
+    va = row['PlayerValue']
     delta = round(va - 1.0, 3)
 
-    st.markdown("### 🌟 Value/Age")
+    st.markdown("### 🌟 PlayerValue")
     col1, col2 = st.columns([1, 2])
     with col1:
         st.metric(
@@ -138,7 +138,7 @@ def render_value_age(df, selected_player, selected_season=None, value_metric='VO
         else:
             verdict = "exactly average for a player this age"
         st.write(
-            f"A Value/Age of **{va:.2f}** means this season's production "
+            f"A PlayerValue of **{va:.2f}** means this season's production "
             f"(measured by **{value_metric}**) is **{verdict}**, after factoring in a "
             f"youth bonus for players younger than the assumed peak age ({peak_age})."
         )
@@ -149,7 +149,7 @@ def render_value_age(df, selected_player, selected_season=None, value_metric='VO
     )
 
 
-render_value_age(df, selected_player, value_metric='VORP')
+render_player_value(df, selected_player, value_metric='VORP')
 st.divider()
 
 # ===========================================================================
@@ -161,8 +161,8 @@ def compute_percentile_radar(df, player_row, position, metric_list):
     for metric in metric_list:
         lower_is_better = {'TOV%'}
         values = position_df[metric].dropna()
-        player_value = player_row[metric].values[0]
-        pct = stats.percentileofscore(values, player_value)
+        metric_value = player_row[metric].values[0]
+        pct = stats.percentileofscore(values, metric_value)
         if metric in lower_is_better:
             pct = 100 - pct
         percentiles.append(round(pct, 1))
