@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import math
 import matplotlib.pyplot as plt
 from scipy import stats
 import plotly.graph_objects as go
@@ -219,43 +220,21 @@ st.divider()
 # DATA SOURCES (see load_zone_data() above for full detail):
 #   1. player_zone_shooting.csv — REAL per-player, per-season FG% in each of
 #      6 zones, aggregated from ~2.8 million actual shot attempts (2005-06
-#      through 2018-19), pulled from stats.nba.com shot chart data. This is
-#      not modeled — it's the player's actual shooting in that zone that season.
+#      through 2018-19), pulled from stats.nba.com shot chart data.
 #   2. league_zone_contest_fg_2014_15.csv — REAL league-wide FG% by zone AND
 #      by closest-defender distance (Wide Open 6ft+, Slight Contest 4-6ft,
-#      Heavy Contest 0-4ft), from the NBA's 2014-15 SportVU tracking data —
-#      the only season this kind of defender-distance data is public.
+#      Heavy Contest 0-4ft), from the NBA's 2014-15 SportVU tracking data.
 #   3. player_zone_contest_fg_2014_15.csv — the same defender-distance splits
-#      computed per player (min. 10 shots in that zone), for the 2014-15
-#      season specifically.
+#      computed per player (min. 10 shots in that zone), 2014-15 only.
 #
-# HOW THE NUMBER SHOWN IS CHOSEN, per zone:
-#   - If the selected player has >=10 tracked shots in that exact zone during
-#     2014-15, we show their REAL Wide Open / Slight / Heavy Contest split —
-#     no estimation involved.
-#   - Otherwise, we take the player's REAL season FG% in that zone (from shot
-#     #1) and spread it across the three contest levels using the REAL
-#     league-wide shape from #2 (i.e. "wide open shots in this zone are
-#     league-wide X% easier than average, heavily contested shots are Y%
-#     harder") — so the *level* is always real, and only the *contest-level
-#     shape* is a modeled estimate when we lack the player's own tracking data.
-#   - If the player has no recorded shots at all in a zone that season (too
-#     few attempts), we fall back to the league-average zone/contest numbers.
+# HOW THE NUMBER SHOWN IS CHOSEN, per zone: see build_zone_estimate() below —
+# real player tracking data first, then real season FG% spread by the real
+# league contest-level shape, then a league-average fallback.
 
 CONTEST_LEVELS = ['Wide Open', 'Slight Contest', 'Heavy Contest']
 
-ZONE_MARKER_XY = {
-    'Restricted Area (Layup)':  (0, 4),
-    'Free Throw / Short Range': (0, 14),
-    'Mid-Range':                (14, 16),
-    'Left Corner 3':            (-23, 6),
-    'Right Corner 3':           (23, 6),
-    'Above the Break 3':        (0, 32),
-}
-
-# The 2014-15 tracking data can't distinguish corner-3 side (no shot
-# coordinates), only "Corner 3" vs "Above the Break 3". Both corner zones on
-# the court diagram share that same real "Corner 3" contest-level shape.
+# Corner side can't be recovered from the 2014-15 tracking data (no shot
+# coordinates there, only distance) so both corners share one real shape.
 CONTEST_ZONE_LOOKUP = {
     'Restricted Area (Layup)':  'Restricted Area (Layup)',
     'Free Throw / Short Range': 'Free Throw / Short Range',
@@ -265,10 +244,26 @@ CONTEST_ZONE_LOOKUP = {
     'Above the Break 3':        'Above the Break 3',
 }
 
+HOOP_XY = (0, 5.25)
+
+
+def classify_zone(x, y):
+    """Maps any (x, y) court coordinate to one of the 6 shot zones, using the
+    same real NBA zone boundaries (restricted-area radius, paint width,
+    corner-3 line, three-point arc radius) as the shot-log data itself."""
+    dist_hoop = math.sqrt(x ** 2 + (y - HOOP_XY[1]) ** 2)
+    if dist_hoop <= 4:
+        return 'Restricted Area (Layup)'
+    if abs(x) <= 8 and 0 <= y <= 19:
+        return 'Free Throw / Short Range'
+    if abs(x) >= 22 and y <= 14.1:
+        return 'Left Corner 3' if x < 0 else 'Right Corner 3'
+    if dist_hoop >= 23.75:
+        return 'Above the Break 3'
+    return 'Mid-Range'
+
 
 def league_contest_shape(contest_zone):
-    """Real league-wide FG% for each contest level in a zone, plus the
-    FGA-weighted overall FG% used as the reference point for scaling."""
     rows = league_contest_df[league_contest_df['Zone'] == contest_zone]
     by_level = {r['Contest']: r['FG_PCT'] for _, r in rows.iterrows()}
     total_fga = rows['FGA'].sum()
@@ -277,8 +272,6 @@ def league_contest_shape(contest_zone):
 
 
 def player_real_zone_fg(player, season, zone):
-    """The player's REAL FG% in this zone/season from actual shot logs, or
-    None if they have no recorded attempts there that season."""
     row = zone_shooting_df[(zone_shooting_df['Player'] == player) &
                             (zone_shooting_df['Season'] == season) &
                             (zone_shooting_df['Zone'] == zone)]
@@ -288,8 +281,6 @@ def player_real_zone_fg(player, season, zone):
 
 
 def player_real_contest_split(player, contest_zone):
-    """The player's REAL 2014-15 defender-distance split for a zone, if they
-    have enough tracked volume (>=10 shots) there that season."""
     rows = player_contest_df[(player_contest_df['player_name'] == player.lower()) &
                               (player_contest_df['Zone'] == contest_zone)]
     if rows.empty or rows['FGA'].sum() < 10:
@@ -312,12 +303,42 @@ def build_zone_estimate(player, season, zone):
                for c in CONTEST_LEVELS}
         return est, "Player's real season FG% in this zone, spread using real league contest shape"
 
-    # Fallback: league average for this zone (no player shot data available)
     return {c: league_shape.get(c, 0.35) for c in CONTEST_LEVELS}, 'League average (no shot data for this player/zone)'
 
 
-def build_court_figure(zone_fg_for_color, season_label):
+@st.cache_data
+def build_hot_zone_grid(player, season, cell_size=1.0):
+    """Builds the heatmap grid: every cell colored by the player's real
+    Slight-Contest FG% for whichever zone that cell falls in, and tagged with
+    the zone name so a click anywhere resolves to a zone + exact coordinate."""
+    xs = np.arange(-25, 25, cell_size) + cell_size / 2
+    ys = np.arange(0, 40, cell_size) + cell_size / 2  # no real shots that deep
+
+    zone_fg_lookup = {}
+    for zone in CONTEST_ZONE_LOOKUP:
+        est, _ = build_zone_estimate(player, season, zone)
+        zone_fg_lookup[zone] = est['Slight Contest']
+
+    z = np.empty((len(ys), len(xs)))
+    customdata = np.empty((len(ys), len(xs)), dtype=object)
+    for i, y in enumerate(ys):
+        for j, x in enumerate(xs):
+            zone = classify_zone(x, y)
+            z[i, j] = zone_fg_lookup[zone]
+            customdata[i, j] = zone
+    return xs, ys, z, customdata
+
+
+def build_court_figure(player, season):
     fig = go.Figure()
+
+    xs, ys, z, customdata = build_hot_zone_grid(player, season)
+    fig.add_trace(go.Heatmap(
+        x=xs, y=ys, z=z, customdata=customdata,
+        colorscale='YlOrRd', zmin=0.20, zmax=0.75, showscale=False, zsmooth=False,
+        hovertemplate='%{customdata}<br>Slight-contest FG%%: %{z:.1%}<extra></extra>',
+        name='hotzones'
+    ))
 
     court_shapes = [
         dict(type='rect', x0=-25, y0=0, x1=25, y1=47, line=dict(color='white', width=2)),
@@ -325,62 +346,101 @@ def build_court_figure(zone_fg_for_color, season_label):
         dict(type='circle', x0=-6, y0=13, x1=6, y1=25, line=dict(color='white', width=2)),
         dict(type='circle', x0=-4, y0=1.25, x1=4, y1=9.25, line=dict(color='white', width=2)),
         dict(type='line', x0=-3, y0=4, x1=3, y1=4, line=dict(color='white', width=3)),
-        dict(type='line', x0=-25, y0=47, x1=25, y1=47, line=dict(color='white', width=2)),
-        dict(type='circle', x0=-6, y0=41, x1=6, y1=53, line=dict(color='white', width=2)),
         dict(type='line', x0=-22, y0=0, x1=-22, y1=14.2, line=dict(color='white', width=2)),
         dict(type='line', x0=22, y0=0, x1=22, y1=14.2, line=dict(color='white', width=2)),
+        dict(type='circle', x0=-0.75, y0=4.5, x1=0.75, y1=6, line=dict(color='black', width=2)),
     ]
-
-    import math
     arc_x, arc_y = [], []
     for deg in range(0, 181):
         rad = math.radians(deg)
-        x = 23.75 * math.cos(rad)
-        y = 5.25 + 23.75 * math.sin(rad)
-        if y <= 47:
-            arc_x.append(x)
-            arc_y.append(y)
+        arc_x.append(23.75 * math.cos(rad))
+        arc_y.append(5.25 + 23.75 * math.sin(rad))
     fig.add_trace(go.Scatter(x=arc_x, y=arc_y, mode='lines',
                               line=dict(color='white', width=2), hoverinfo='skip',
-                              showlegend=False))
-
-    court_shapes.append(dict(type='circle', x0=-0.75, y0=4.5, x1=0.75, y1=6,
-                              line=dict(color='orange', width=2)))
+                              showlegend=False, name='arc'))
     fig.update_layout(shapes=court_shapes)
 
-    zones = list(ZONE_MARKER_XY.keys())
-    xs = [ZONE_MARKER_XY[z][0] for z in zones]
-    ys = [ZONE_MARKER_XY[z][1] for z in zones]
-    colors = [zone_fg_for_color[z] for z in zones]
-
-    fig.add_trace(go.Scatter(
-        x=xs, y=ys, mode='markers+text',
-        text=zones, textposition='top center', textfont=dict(color='white', size=10),
-        marker=dict(size=32, color=colors, colorscale='RdYlGn', cmin=0.2, cmax=0.7,
-                    line=dict(color='black', width=1),
-                    colorbar=dict(title='Slight<br>Contest<br>FG%')),
-        customdata=zones,
-        hovertemplate='%{customdata}<br>Click to see the breakdown<extra></extra>',
-        name='Zones'
-    ))
+    for zone, (zx, zy) in {
+        'Restricted Area (Layup)': (0, 3), 'Free Throw / Short Range': (0, 14),
+        'Mid-Range': (14, 16), 'Left Corner 3': (-23.5, 6), 'Right Corner 3': (23.5, 6),
+        'Above the Break 3': (0, 32),
+    }.items():
+        fig.add_annotation(x=zx, y=zy, text=zone, showarrow=False,
+                            font=dict(color='black', size=9), bgcolor='rgba(255,255,255,0.55)')
 
     fig.update_layout(
         plot_bgcolor='#1a5f3f', paper_bgcolor='#1a5f3f',
         xaxis=dict(visible=False, range=[-27, 27]),
-        yaxis=dict(visible=False, range=[-2, 49], scaleanchor='x', scaleratio=1),
+        yaxis=dict(visible=False, range=[-2, 42], scaleanchor='x', scaleratio=1),
         height=560, margin=dict(l=10, r=10, t=30, b=10),
-        title=dict(text=f"{selected_player} ({season_label}) — Click a zone for shot probabilities",
+        title=dict(text=f"{selected_player} ({season}) — click anywhere on the court",
                     font=dict(color='white'))
     )
     return fig
 
 
+def build_shot_animation(x0, y0, make_probability, seed):
+    """Animated top-down shot: the ball travels from the clicked spot to the
+    hoop; marker size humps up then down to suggest the arc's height since
+    this is a 2D bird's-eye view, not a side view. Outcome (make/miss) is a
+    single simulated draw weighted by the zone's Slight-Contest probability —
+    a fun simulation of one shot, not a real recorded result."""
+    rng = np.random.default_rng(seed)
+    made = bool(rng.random() < make_probability)
+
+    n_frames = 18
+    t = np.linspace(0, 1, n_frames)
+    ball_x = x0 + t * (HOOP_XY[0] - x0)
+    ball_y = y0 + t * (HOOP_XY[1] - y0)
+    size = 12 + 20 * np.sin(np.pi * t)
+
+    fig = go.Figure(
+        data=[
+            go.Scatter(x=[x0], y=[y0], mode='markers+text', text=['🏀'],
+                       textfont=dict(size=22), marker=dict(size=1, color='rgba(0,0,0,0)'),
+                       name='shooter', showlegend=False),
+            go.Scatter(x=[ball_x[0]], y=[ball_y[0]], mode='markers',
+                       marker=dict(size=size[0], color='#d35400', line=dict(color='black', width=1)),
+                       name='ball', showlegend=False),
+        ],
+        layout=go.Layout(
+            plot_bgcolor='#1a5f3f', paper_bgcolor='#1a5f3f',
+            xaxis=dict(visible=False, range=[-27, 27]),
+            yaxis=dict(visible=False, range=[-2, 20], scaleanchor='x', scaleratio=1),
+            height=320, margin=dict(l=10, r=10, t=10, b=10),
+            shapes=[dict(type='rect', x0=-8, y0=0, x1=8, y1=19, line=dict(color='white', width=1)),
+                    dict(type='circle', x0=-0.75, y0=4.5, x1=0.75, y1=6, line=dict(color='white', width=2))],
+            updatemenus=[dict(type='buttons', showactive=False, y=1, x=1.15,
+                               buttons=[dict(label='▶ Play Shot', method='animate',
+                                             args=[None, dict(frame=dict(duration=60, redraw=True),
+                                                               fromcurrent=True, transition=dict(duration=0))])])],
+        ),
+        frames=[
+            go.Frame(
+                data=[go.Scatter(x=[ball_x[k]], y=[ball_y[k]],
+                                  marker=dict(size=size[k],
+                                              color=('#27ae60' if (made and k == n_frames - 1) else '#d35400'))],
+                traces=[1],
+            ) for k in range(n_frames)
+        ] + [
+            go.Frame(
+                data=[go.Scatter(x=[HOOP_XY[0]], y=[HOOP_XY[1]],
+                                  marker=dict(size=26, color='#27ae60' if made else '#c0392b'))],
+                traces=[1],
+                layout=go.Layout(annotations=[dict(
+                    x=0, y=10, text=('SWISH! 🎉' if made else 'CLANK ❌'),
+                    showarrow=False, font=dict(size=22, color='white'))])
+            )
+        ]
+    )
+    return fig, made
+
+
 st.markdown("### 🏀 Shot-Zone Probability Explorer")
 st.caption(
-    "Make probability by zone and by how contested the shot is, built from real shot "
-    "data: actual per-zone shooting from ~2.8M tracked shot attempts (2005-06 to "
-    "2018-19), combined with real defender-distance splits from the NBA's 2014-15 "
-    "tracking data. Each zone breakdown below states exactly which of those it's using."
+    "Court shaded by the player's real shooting %% in each zone (yellow = colder, red = hotter). "
+    "Click anywhere on the court to see the make-probability breakdown for that zone and watch a "
+    "simulated shot from that exact spot."
 )
 
 if player_data.empty:
@@ -390,27 +450,22 @@ else:
     zone_season = st.selectbox('Season for shot-zone breakdown:', available_seasons,
                                 index=len(available_seasons) - 1, key='zone_season')
 
-    zone_estimates = {}
-    for zone in ZONE_MARKER_XY:
-        zone_estimates[zone] = build_zone_estimate(selected_player, zone_season, zone)
-
-    zone_color_lookup = {z: zone_estimates[z][0]['Slight Contest'] for z in ZONE_MARKER_XY}
-    court_fig = build_court_figure(zone_color_lookup, zone_season)
-
+    court_fig = build_court_figure(selected_player, zone_season)
     selection = st.plotly_chart(
         court_fig, use_container_width=True,
         on_select='rerun', selection_mode='points', key='shot_zone_court'
     )
 
-    clicked_zone = None
+    clicked = None
     if selection and selection.get('selection', {}).get('points'):
         point = selection['selection']['points'][0]
-        clicked_zone = point.get('customdata')
+        clicked = (point.get('customdata'), point.get('x'), point.get('y'))
 
-    if clicked_zone is None:
-        st.info("Click any zone marker on the court above to see the make-probability breakdown.")
+    if clicked is None:
+        st.info("Click anywhere on the court above to see the make-probability breakdown for that spot.")
     else:
-        player_vals, source_label = zone_estimates[clicked_zone]
+        clicked_zone, click_x, click_y = clicked
+        player_vals, source_label = build_zone_estimate(selected_player, zone_season, clicked_zone)
         league_shape, _ = league_contest_shape(CONTEST_ZONE_LOOKUP[clicked_zone])
 
         st.markdown(f"#### {clicked_zone}")
@@ -436,7 +491,19 @@ else:
                     delta=f"{(player_vals[c] - league_val) * 100:+.1f} pts vs league"
                 )
 
+        st.markdown("##### Simulated shot from this spot")
+        st.caption(
+            "One randomized shot from the clicked spot, weighted by the Slight-Contest probability "
+            "above — press Play. This is a fun single-shot simulation, not a recorded or predicted result."
+        )
+        anim_fig, made = build_shot_animation(
+            click_x, click_y, player_vals['Slight Contest'],
+            seed=hash((selected_player, zone_season, clicked_zone, round(click_x, 1), round(click_y, 1))) % (2**32)
+        )
+        st.plotly_chart(anim_fig, use_container_width=True, key='shot_animation')
+
 st.divider()
+
 
 # ===========================================================================
 # ORIGINAL GRAPHS
