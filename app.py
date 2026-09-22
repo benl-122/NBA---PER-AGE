@@ -419,7 +419,7 @@ def build_shot_animation(x0, y0, make_probability, seed):
             go.Frame(
                 data=[go.Scatter(x=[ball_x[k]], y=[ball_y[k]],
                                   marker=dict(size=size[k],
-                                              color=('#27ae60' if (made and k == n_frames - 1) else '#d35400'))],
+                                              color=('#27ae60' if (made and k == n_frames - 1) else '#d35400')),
                 traces=[1],
             ) for k in range(n_frames)
         ] + [
