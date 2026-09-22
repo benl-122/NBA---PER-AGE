@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import stats
-from sklearn.neighbors import NearestNeighbors
 import plotly.graph_objects as go
 
 
@@ -62,9 +61,9 @@ if 'Season' in player_data.columns:
     cols.insert(3, 'Season')
     player_data = player_data[cols]
 
-# Display data
+# Display data (hide_index drops the leading row-number column)
 st.header(f"Player: {selected_player} ({selected_position})")
-st.write(player_data)
+st.dataframe(player_data, hide_index=True)
 
 # ===========================================================================
 # NEW FEATURE: PlayerValue — headline callout stat
@@ -192,41 +191,195 @@ render_percentile_radar(df, player_data, selected_player, selected_position, met
 st.divider()
 
 # ===========================================================================
-# NEW FEATURE: Most similar players finder
+# NEW FEATURE: Interactive shot-zone hot map
 # ===========================================================================
-def find_similar_players(df, selected_player, metric_list, n=5):
-    data = df.dropna(subset=metric_list).copy()
-    z = data[metric_list].apply(lambda col: (col - col.mean()) / col.std())
+#
+# IMPORTANT DATA NOTE:
+#   The underlying CSV only has season-level *advanced* box-score stats
+#   (PER, TS%, VORP, etc.) — it does not contain shot-by-shot location or
+#   defender-distance data (that lives in NBA tracking data, which isn't
+#   available here). So the FG% shown per zone/contest-level below is a
+#   MODEL, not a lookup of real shot logs:
+#     1. Each zone/contest cell starts from a realistic league-average FG%
+#        (roughly matching publicly known closest-defender splits, e.g.
+#        shots at the rim are made far more often than contested threes).
+#     2. That baseline is then scaled up or down by the selected player's
+#        True Shooting % that season relative to the league/position
+#        average TS% that same season — a real, computed number from the
+#        dataset — so a more efficient scorer shows a higher probability
+#        across the board and vice versa.
+#   Treat the numbers as an illustrative estimate of shooting difficulty
+#   and player efficiency, not as verified play-by-play shooting splits.
 
-    if selected_player not in data['Player'].values:
-        return pd.DataFrame()
+ZONE_LEAGUE_AVG_FG = {
+    'Restricted Area (Layup)':   {'Wide Open': 0.68, 'Slight Contest': 0.62, 'Heavy Contest': 0.52},
+    'Free Throw / Short Range':  {'Wide Open': 0.46, 'Slight Contest': 0.41, 'Heavy Contest': 0.33},
+    'Mid-Range':                 {'Wide Open': 0.44, 'Slight Contest': 0.39, 'Heavy Contest': 0.31},
+    'Left Corner 3':             {'Wide Open': 0.40, 'Slight Contest': 0.35, 'Heavy Contest': 0.28},
+    'Right Corner 3':            {'Wide Open': 0.40, 'Slight Contest': 0.35, 'Heavy Contest': 0.28},
+    'Above the Break 3':         {'Wide Open': 0.37, 'Slight Contest': 0.33, 'Heavy Contest': 0.26},
+}
 
-    player_idx = data.index[data['Player'] == selected_player][0]
-    player_vec = z.loc[[player_idx]]
-
-    nn = NearestNeighbors(n_neighbors=min(n + 1, len(z)))
-    nn.fit(z.values)
-    distances, indices = nn.kneighbors(player_vec.values)
-
-    result_idx = data.index[indices[0]]
-    results = data.loc[result_idx, ['Player', 'Season', 'Pos', 'Age'] + metric_list].copy()
-    results['similarity_distance'] = distances[0]
-    results = results[results['Player'] != selected_player]
-    return results.head(n)
+# Center point (court coordinates, hoop at x=0, y=5.25) used both to place
+# the clickable marker and to anchor the shaded zone patch.
+ZONE_MARKER_XY = {
+    'Restricted Area (Layup)':  (0, 4),
+    'Free Throw / Short Range': (0, 14),
+    'Mid-Range':                (14, 16),
+    'Left Corner 3':            (-23, 6),
+    'Right Corner 3':           (23, 6),
+    'Above the Break 3':        (0, 32),
+}
 
 
-def render_similarity_finder(df, selected_player, metric_list):
-    similar = find_similar_players(df, selected_player, metric_list, n=5)
-    st.subheader(f"Players Most Similar to {selected_player}")
-    if similar.empty:
-        st.write("Not enough data to compute similarity.")
+def player_efficiency_factor(df, player_row):
+    """Ratio of the player's TS% to the league/position average TS% for that
+    same season, clipped so the model stays in a sane range."""
+    ts = player_row['TS%'].values[0]
+    season = player_row['Season'].values[0]
+    pos = player_row['Pos'].values[0]
+    if pd.isna(ts):
+        return 1.0
+    baseline = df[(df['Season'] == season) & (df['Pos'] == pos)]['TS%'].mean()
+    if pd.isna(baseline) or baseline == 0:
+        return 1.0
+    factor = ts / baseline
+    return float(np.clip(factor, 0.6, 1.6))
+
+
+def build_court_figure(zone_fg_for_color):
+    """Draws a half-court and places one clickable marker per zone, colored
+    by that zone's 'Slight Contest' make probability for the selected player."""
+    fig = go.Figure()
+
+    court_shapes = [
+        # Court boundary (half court)
+        dict(type='rect', x0=-25, y0=0, x1=25, y1=47, line=dict(color='white', width=2)),
+        # Paint / lane
+        dict(type='rect', x0=-8, y0=0, x1=8, y1=19, line=dict(color='white', width=2)),
+        # Free throw circle (top half solid via full circle, good enough visually)
+        dict(type='circle', x0=-6, y0=13, x1=6, y1=25, line=dict(color='white', width=2)),
+        # Restricted area arc
+        dict(type='circle', x0=-4, y0=1.25, x1=4, y1=9.25, line=dict(color='white', width=2)),
+        # Backboard
+        dict(type='line', x0=-3, y0=4, x1=3, y1=4, line=dict(color='white', width=3)),
+        # Half-court line + center circle
+        dict(type='line', x0=-25, y0=47, x1=25, y1=47, line=dict(color='white', width=2)),
+        dict(type='circle', x0=-6, y0=41, x1=6, y1=53, line=dict(color='white', width=2)),
+        # Three point corners (straight sections)
+        dict(type='line', x0=-22, y0=0, x1=-22, y1=14.2, line=dict(color='white', width=2)),
+        dict(type='line', x0=22, y0=0, x1=22, y1=14.2, line=dict(color='white', width=2)),
+    ]
+
+    # Three point arc (approximate with a path)
+    import math
+    arc_x, arc_y = [], []
+    for deg in range(0, 181):
+        rad = math.radians(deg)
+        x = 23.75 * math.cos(rad)
+        y = 5.25 + 23.75 * math.sin(rad)
+        if y <= 47:
+            arc_x.append(x)
+            arc_y.append(y)
+    fig.add_trace(go.Scatter(x=arc_x, y=arc_y, mode='lines',
+                              line=dict(color='white', width=2), hoverinfo='skip',
+                              showlegend=False))
+
+    # Hoop
+    court_shapes.append(dict(type='circle', x0=-0.75, y0=4.5, x1=0.75, y1=6,
+                              line=dict(color='orange', width=2)))
+
+    fig.update_layout(shapes=court_shapes)
+
+    zones = list(ZONE_MARKER_XY.keys())
+    xs = [ZONE_MARKER_XY[z][0] for z in zones]
+    ys = [ZONE_MARKER_XY[z][1] for z in zones]
+    colors = [zone_fg_for_color[z] for z in zones]
+
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys, mode='markers+text',
+        text=zones, textposition='top center', textfont=dict(color='white', size=10),
+        marker=dict(size=32, color=colors, colorscale='RdYlGn', cmin=0.2, cmax=0.7,
+                    line=dict(color='black', width=1),
+                    colorbar=dict(title='Slight<br>Contest<br>FG%')),
+        customdata=zones,
+        hovertemplate='%{customdata}<br>Click to see the breakdown<extra></extra>',
+        name='Zones'
+    ))
+
+    fig.update_layout(
+        plot_bgcolor='#1a5f3f', paper_bgcolor='#1a5f3f',
+        xaxis=dict(visible=False, range=[-27, 27]),
+        yaxis=dict(visible=False, range=[-2, 49], scaleanchor='x', scaleratio=1),
+        height=560, margin=dict(l=10, r=10, t=30, b=10),
+        title=dict(text=f"{selected_player} — Click a zone for shot probabilities",
+                    font=dict(color='white'))
+    )
+    return fig
+
+
+st.markdown("### 🏀 Shot-Zone Probability Explorer")
+st.caption(
+    "Estimated make probability by zone and by how contested the shot is. These are "
+    "modeled from the player's True Shooting % relative to the league/position average "
+    "that season, applied to realistic zone/contest baselines — not real shot-log data "
+    "(see code comments for the full explanation)."
+)
+
+if player_data.empty:
+    st.write("No data available to build the shot chart for this player.")
+else:
+    eff_factor = player_efficiency_factor(df, player_data)
+
+    zone_player_fg = {}
+    for zone, contest_levels in ZONE_LEAGUE_AVG_FG.items():
+        zone_player_fg[zone] = {
+            level: float(np.clip(base * eff_factor, 0.10, 0.85))
+            for level, base in contest_levels.items()
+        }
+
+    # color markers by each zone's "Slight Contest" number for the selected player
+    zone_color_lookup = {z: zone_player_fg[z]['Slight Contest'] for z in ZONE_LEAGUE_AVG_FG}
+
+    court_fig = build_court_figure(zone_color_lookup)
+
+    selection = st.plotly_chart(
+        court_fig, use_container_width=True,
+        on_select='rerun', selection_mode='points', key='shot_zone_court'
+    )
+
+    clicked_zone = None
+    if selection and selection.get('selection', {}).get('points'):
+        point = selection['selection']['points'][0]
+        clicked_zone = point.get('customdata')
+
+    if clicked_zone is None:
+        st.info("Click any zone marker on the court above to see the make-probability breakdown.")
     else:
-        st.dataframe(similar.reset_index(drop=True))
-        st.caption("Similarity is based on standardized distance across all listed metrics — "
-                   "smaller distance means a closer statistical match.")
+        st.markdown(f"#### {clicked_zone}")
+        contest_levels = ['Wide Open', 'Slight Contest', 'Heavy Contest']
+        player_vals = [zone_player_fg[clicked_zone][c] for c in contest_levels]
+        league_vals = [ZONE_LEAGUE_AVG_FG[clicked_zone][c] for c in contest_levels]
 
+        bar_fig = go.Figure()
+        bar_fig.add_trace(go.Bar(name=selected_player, x=contest_levels,
+                                  y=[v * 100 for v in player_vals], marker_color='royalblue'))
+        bar_fig.add_trace(go.Bar(name='League Average', x=contest_levels,
+                                  y=[v * 100 for v in league_vals], marker_color='lightgray'))
+        bar_fig.update_layout(barmode='group', yaxis_title='Make Probability (%)',
+                               yaxis=dict(range=[0, 90]), height=380,
+                               title=f"{clicked_zone}: {selected_player} vs. League Average")
+        st.plotly_chart(bar_fig, use_container_width=True)
 
-render_similarity_finder(df, selected_player, metric_list)
+        cols = st.columns(3)
+        for c, col in zip(contest_levels, cols):
+            with col:
+                st.metric(
+                    label=c,
+                    value=f"{zone_player_fg[clicked_zone][c] * 100:.1f}%",
+                    delta=f"{(zone_player_fg[clicked_zone][c] - ZONE_LEAGUE_AVG_FG[clicked_zone][c]) * 100:+.1f} pts vs league"
+                )
+
 st.divider()
 
 # ===========================================================================
