@@ -91,6 +91,20 @@ st.dataframe(player_data, hide_index=True)
 # ===========================================================================
 # NEW FEATURE: PlayerValue — headline callout stat
 # ===========================================================================
+#
+# Design:
+#   - value_metric summarizes overall production (defaults to VORP, an
+#     all-in-one wins-above-replacement style stat).
+#   - Baseline = league-average value at that specific age. PlayerValue of 1.0
+#     means "exactly as productive as the typical player at that age."
+#   - Youth bonus: the same production is worth MORE the younger the player
+#     is, since a young player producing at an average (or above-average)
+#     level has more years of development/team-control runway ahead than an
+#     older player putting up the same numbers — the same logic real
+#     trade-value charts use to price production + youth together.
+#
+#   player_value = (player_value / league_avg_value_at_age) * youth_multiplier
+#   youth_multiplier = 1 + max(0, peak_age - age) * youth_bonus_per_year
 def compute_player_value(df, value_metric='VORP', peak_age=27, youth_bonus_per_year=0.03):
     data = df.dropna(subset=[value_metric, 'Age']).copy()
     league_avg_by_age = data.groupby('Age')[value_metric].mean()
@@ -108,7 +122,7 @@ def compute_player_value(df, value_metric='VORP', peak_age=27, youth_bonus_per_y
 
 
 def render_player_value(df, selected_player, selected_season=None, value_metric='VORP',
-                        peak_age=27, youth_bonus_per_year=0.03):
+                      peak_age=27, youth_bonus_per_year=0.03):
     """
     Highlights PlayerValue as a standout callout metric (not a chart) - a big
     number plus a one-line interpretation.
@@ -202,8 +216,25 @@ st.divider()
 # ===========================================================================
 # NEW FEATURE: Interactive shot-zone hot map (real shot data)
 # ===========================================================================
+#
+# DATA SOURCES (see load_zone_data() above for full detail):
+#   1. player_zone_shooting.csv — REAL per-player, per-season FG% in each of
+#      6 zones, aggregated from ~2.8 million actual shot attempts (2005-06
+#      through 2018-19), pulled from stats.nba.com shot chart data.
+#   2. league_zone_contest_fg_2014_15.csv — REAL league-wide FG% by zone AND
+#      by closest-defender distance (Wide Open 6ft+, Slight Contest 4-6ft,
+#      Heavy Contest 0-4ft), from the NBA's 2014-15 SportVU tracking data.
+#   3. player_zone_contest_fg_2014_15.csv — the same defender-distance splits
+#      computed per player (min. 10 shots in that zone), 2014-15 only.
+#
+# HOW THE NUMBER SHOWN IS CHOSEN, per zone: see build_zone_estimate() below —
+# real player tracking data first, then real season FG% spread by the real
+# league contest-level shape, then a league-average fallback.
+
 CONTEST_LEVELS = ['Wide Open', 'Slight Contest', 'Heavy Contest']
 
+# Corner side can't be recovered from the 2014-15 tracking data (no shot
+# coordinates there, only distance) so both corners share one real shape.
 CONTEST_ZONE_LOOKUP = {
     'Restricted Area (Layup)':  'Restricted Area (Layup)',
     'Free Throw / Short Range': 'Free Throw / Short Range',
@@ -217,6 +248,9 @@ HOOP_XY = (0, 5.25)
 
 
 def classify_zone(x, y):
+    """Maps any (x, y) court coordinate to one of the 6 shot zones, using the
+    same real NBA zone boundaries (restricted-area radius, paint width,
+    corner-3 line, three-point arc radius) as the shot-log data itself."""
     dist_hoop = math.sqrt(x ** 2 + (y - HOOP_XY[1]) ** 2)
     if dist_hoop <= 4:
         return 'Restricted Area (Layup)'
@@ -255,6 +289,7 @@ def player_real_contest_split(player, contest_zone):
 
 
 def build_zone_estimate(player, season, zone):
+    """Returns (dict of contest-level -> FG%, source label) for one zone."""
     contest_zone = CONTEST_ZONE_LOOKUP[zone]
     league_shape, league_overall = league_contest_shape(contest_zone)
 
@@ -273,8 +308,11 @@ def build_zone_estimate(player, season, zone):
 
 @st.cache_data
 def build_hot_zone_grid(player, season, cell_size=1.0):
+    """Builds the heatmap grid: every cell colored by the player's real
+    Slight-Contest FG% for whichever zone that cell falls in, and tagged with
+    the zone name so a click anywhere resolves to a zone + exact coordinate."""
     xs = np.arange(-25, 25, cell_size) + cell_size / 2
-    ys = np.arange(0, 40, cell_size) + cell_size / 2
+    ys = np.arange(0, 40, cell_size) + cell_size / 2  # no real shots that deep
 
     zone_fg_lookup = {}
     for zone in CONTEST_ZONE_LOOKUP:
@@ -318,8 +356,8 @@ def build_court_figure(player, season):
         arc_x.append(23.75 * math.cos(rad))
         arc_y.append(5.25 + 23.75 * math.sin(rad))
     fig.add_trace(go.Scatter(x=arc_x, y=arc_y, mode='lines',
-                             line=dict(color='white', width=2), hoverinfo='skip',
-                             showlegend=False, name='arc'))
+                              line=dict(color='white', width=2), hoverinfo='skip',
+                              showlegend=False, name='arc'))
     fig.update_layout(shapes=court_shapes)
 
     for zone, (zx, zy) in {
@@ -328,7 +366,7 @@ def build_court_figure(player, season):
         'Above the Break 3': (0, 32),
     }.items():
         fig.add_annotation(x=zx, y=zy, text=zone, showarrow=False,
-                           font=dict(color='black', size=9), bgcolor='rgba(255,255,255,0.55)')
+                            font=dict(color='black', size=9), bgcolor='rgba(255,255,255,0.55)')
 
     fig.update_layout(
         plot_bgcolor='#1a5f3f', paper_bgcolor='#1a5f3f',
@@ -336,12 +374,17 @@ def build_court_figure(player, season):
         yaxis=dict(visible=False, range=[-2, 42], scaleanchor='x', scaleratio=1),
         height=560, margin=dict(l=10, r=10, t=30, b=10),
         title=dict(text=f"{selected_player} ({season}) — click anywhere on the court",
-                   font=dict(color='white'))
+                    font=dict(color='white'))
     )
     return fig
 
 
 def build_shot_animation(x0, y0, make_probability, seed):
+    """Animated top-down shot: the ball travels from the clicked spot to the
+    hoop; marker size humps up then down to suggest the arc's height since
+    this is a 2D bird's-eye view, not a side view. Outcome (make/miss) is a
+    single simulated draw weighted by the zone's Slight-Contest probability —
+    a fun simulation of one shot, not a real recorded result."""
     rng = np.random.default_rng(seed)
     made = bool(rng.random() < make_probability)
 
@@ -370,7 +413,7 @@ def build_shot_animation(x0, y0, make_probability, seed):
             updatemenus=[dict(type='buttons', showactive=False, y=1, x=1.15,
                                buttons=[dict(label='▶ Play Shot', method='animate',
                                              args=[None, dict(frame=dict(duration=60, redraw=True),
-                                                              fromcurrent=True, transition=dict(duration=0))])])],
+                                                               fromcurrent=True, transition=dict(duration=0))])])],
         ),
         frames=[
             go.Frame(
@@ -461,12 +504,17 @@ else:
 
 st.divider()
 
+
 # ===========================================================================
 # ORIGINAL GRAPHS
 # ===========================================================================
+# Calculate average
 average_metric = filtered_df.groupby('Age')[selected_metric].mean().reset_index()
+
+# Calculate median
 median_metric = filtered_df.groupby('Age')[selected_metric].median().reset_index()
 
+# player's vs Age and average vs Age and median vs Age
 fig, ax = plt.subplots(figsize=(10, 6))
 ax.plot(player_data['Age'], player_data[selected_metric], marker='o', linestyle='-',
         color='blue', label=f'{selected_player}')
@@ -482,6 +530,7 @@ ax.grid(True)
 
 st.pyplot(fig)
 
+# note about survivorship bias
 st.info("Note: the player metrics sometimes spike in the later years because typically, "
         "only star players continue to play at an older age. The sample size is therefore "
         "smaller, including only very good players, and this leads to a higher rating than "
